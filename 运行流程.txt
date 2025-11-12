@@ -1,0 +1,43 @@
+# ========================================
+# Step 1: 训练 Backbone + OverlapHead
+# ========================================
+python train/train_stage1_backbone.py
+
+# 输出：
+# → outputs/stage1/backbone_final.ckpt
+# → outputs/stage1/overlap_final.ckpt
+# → outputs/stage1/bevnet_final.ckpt
+
+# 训练时间：3-5天（300k iterations）
+# GPU要求：1x V100 (16GB)
+
+
+# ========================================
+# Step 2: 提取BEV特征（自动完成）
+# ========================================
+# train_stage2_vlad.py会自动检测并执行
+# 或手动运行：
+# python tools/utils/gen_bev_features.py
+
+# 生成：
+# → sequences/XX/BEV_FEA/*.npy（每个点云一个特征文件）
+
+
+# ========================================
+# Step 3: 训练 AttnVLAD
+# ========================================
+python train/train_stage2_vlad.py
+
+# 输出：
+# → outputs/stage2/attnvlad_final.ckpt
+
+# 训练时间：1-2天（100k iterations）
+
+
+# ========================================
+# Step 4: 评估
+# ========================================
+python evaluate/evaluate.py
+
+# 输出：
+# → Recall@1, Recall@5, Recall@1% 等指标

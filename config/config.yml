@@ -1,0 +1,62 @@
+data_root:
+  data_root_folder: "/home/wzj/pan1/Data/KITTI/odometry/dataset/sequences"
+
+extractor_config:
+  seqs: ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10"]
+  pretrained_backbone_model: "/home/wzj/pan1/CFPR-master/models/backbone.ckpt"
+  batch_num: 1
+
+# Stage1: 训练Backbone + OverlapHead (BEVNet风格)
+stage1_training_config:
+  training_seqs: ["00", "01", "02", "03", "04", "05", "06", "07"]
+  out_folder: "/home/wzj/pan1/CFPR-master/outputs/stage1"
+  # 正样本距离范围：0-60m之间的帧对视为正样本
+  pos_threshold_min: 0
+  pos_threshold_max: 60
+  # 负样本距离阈值：140m内的帧对用于构建pairs字典（但实际训练用点级负样本）
+  neg_threshold: 140
+  # 点云体素化范围和分辨率
+  coords_range_xyz: [-50., -50, -4, 50, 50, 3]  # x,y,z的最小最大值
+  div_n: [256, 256, 32]  # 体素网格分辨率
+  # 训练超参数
+  batch_size: 1
+  num_iter: 300000  # 总迭代次数
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-6
+  lr_decay_gamma: 0.99  # 每1000次迭代学习率衰减
+  lr_decay_step: 1000
+  # 数据增强
+  random_rotation: true
+  random_occlusion: true
+  # 保存设置
+  save_interval: 1000  # 每1000次迭代保存一次
+  num_workers: 8
+
+# Stage2: 训练AttnVLADHead (CFPR风格，使用triplet loss)
+stage2_training_config:
+  training_seqs: ["00", "01", "02", "03", "04", "05", "06", "07"]
+  out_folder: "/home/wzj/pan1/CFPR-master/outputs/stage2"
+  model_name: "AttnVLADHead"
+  # 使用Stage1训练好的backbone（可选：如果为空则需要先提取特征）
+  pretrained_backbone_model: "/home/wzj/pan1/CFPR-master/outputs/stage1/backbone_final.ckpt"
+  pretrained_vlad_model: ""  # 为空表示从头训练
+  # 正负样本距离阈值（场景级）
+  pos_threshold: 10   # 10m内为正样本
+  neg_threshold: 50   # 50m外为负样本
+  batch_size: 2
+  epoch: 100000
+  learning_rate: 1.0e-5
+  weight_decay: 1.0e-6
+  num_workers: 8
+
+evaluate_config:
+  seqs: ["00", "02", "05", "06", "07", "08"]
+  model_name: "AttnVLADHead"
+  # 使用Stage1和Stage2训练的模型
+  test_vlad_model: "/home/wzj/pan1/CFPR-master/outputs/stage2/attnvlad_final.ckpt"
+  test_overlap_model: "/home/wzj/pan1/CFPR-master/outputs/stage1/overlap_final.ckpt"
+  th_min: 0
+  th_max: 10
+  th_max_pre: 10
+  skip: 50
+  batch_num: 16
