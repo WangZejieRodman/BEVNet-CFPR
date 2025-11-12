@@ -1,0 +1,251 @@
+BEVNet-CFPR 项目架构
+
+一、BEVNet架构（Stage1模型）
+
+输入
+```
+两帧点云体素化拼接 [2, 32, 256, 256]
+- Batch=2: query + positive
+- 32通道: Z轴离散化（高度层）
+- 256×256: XY平面（俯视图）
+```
+
+编码器（下采样提取特征）
+```
+[256×256, 32通道] ← 输入通道数(inchannels=32)
+  ↓ BottleneckSparse2D(k=11) + MaxPool(3,2,1)
+[128×128, 64通道]
+  ↓ BottleneckSparse2D(k=11)
+[128×128, 64通道]
+  ↓ BottleneckSparse2D(k=7) + MaxPool(3,2,1)
+[64×64, 128通道]
+  ↓ BottleneckSparse2D(k=7)
+[64×64, 128通道]
+  ↓ BottleneckSparse2D(k=5) + MaxPool(3,2,1)
+[32×32, 256通道]
+  ↓ BottleneckSparse2D(k=5)
+[32×32, 256通道]
+  ↓ SubMConv2d(k=3)
+[32×32, 512通道] ← 底层特征（x4）
+```
+作用：逐步下采样提取语义特征，通道递增补偿空间损失，大kernel捕获大感受野**
+
+跨帧特征融合（底层）
+```
+x4特征 [N, 512]
+  ↓ 分离query和positive
+  ↓ 双向注意力融合（FeatureFuse）
+query→看positive, positive→看query
+  ↓ 残差连接
+融合特征 [N, 512]
+```
+作用：让两帧特征互相感知，增强匹配能力**
+
+分支A：重叠度预测（底层）
+```
+融合特征 [32×32, 512]
+  ↓ SubMConv2d(512→256, k=3) + BN + ReLU
+[32×32, 256]
+  ↓ SubMConv2d(256→1, k=3) + Sigmoid
+重叠度分数 [32×32, 1] (每个体素0-1)
+  ↓ 平均池化
+标量重叠度 (0-1)
+```
+作用：粗粒度判断两帧是否重叠（回环检测初筛）**
+
+解码器（上采样恢复分辨率）
+```
+[32×32, 512]
+  ↓ SparseInverseConv2d(indice_key='up3')
+  ↓ + 跳跃连接(conv3) → UpBlock融合
+[64×64, 256]
+  ↓ SparseInverseConv2d(indice_key='up2')
+  ↓ + 跳跃连接(conv2) → UpBlock融合
+[128×128, 128]
+  ↓ SparseInverseConv2d(indice_key='up1')
+  ↓ + 跳跃连接(conv1) → UpBlock融合
+[256×256, 64] ← 高分辨率特征（x_last）
+```
+作用：恢复空间细节，融合多尺度信息用于点级预测**
+
+分支B：描述符输出
+```
+x_last [256×256, 64]
+  ↓ SubMConv2d(64→32, k=1)
+[256×256, 32]
+  ↓ L2归一化
+归一化描述符 [N, 32]
+```
+作用：点级特征描述子，用于点对匹配（circle loss监督）**
+
+分支C：高度权重
+```
+x_last [256×256, 64]
+  ↓ SubMConv2d(64→32, k=3)
+[256×256, 32]
+  ↓ Sigmoid归一化
+高度权重 [N, 32]
+```
+作用：估计每个XY位置的Z坐标分布（softmax权重对应32层高度）**
+
+分支D：关键点分数
+```
+描述符特征 [256×256, 32]
+  ↓ ScoreHead:
+    - 局部最大值检测（MaxPool vs AvgPool）
+    - 深度显著性（通道维max）
+  ↓ 可选：× 重叠度分数（eval模式抑制非重叠区域）
+关键点分数 [N, 1]
+```
+作用：检测最显著、最适合匹配的关键点（detection loss监督）**
+
+最终输出
+```
+高分辨率稀疏Tensor: out.features [N, 65]
+  - [0:31]: 描述符（L2归一化）
+  - [31:63]: 高度权重（Sigmoid归一化）
+  - [64]: 关键点分数（0-1）
+
+底层稀疏Tensor: out4.features [M, 1]
+  - 重叠度预测（每体素0-1）
+
+底层Dense: x4 [2, 512, 32, 32]
+  - 用于Stage2特征提取
+```
+
+核心设计思想
+1. BEV表示：3D→2D，Z作为通道，用稀疏2D卷积高效处理
+2. U-Net结构：编码器压缩，解码器还原，跳跃连接保留细节
+3. 跨帧融合：底层注意力让两帧特征互相感知
+4. 多任务学习：共享backbone，多输出头联合优化
+5. 多尺度监督：高分辨率点级匹配，低分辨率区域重叠
+
+二、AttnVLADHead架构（Stage2模型）
+
+输入
+```
+BEV底层特征 [B, 512, 32, 32]
+- 来自Stage1 Backbone输出的x4
+- 已包含语义信息
+```
+
+特征增强
+```
+[B, 512, 32×32] ← Reshape展平
+  ↓ 自注意力增强（FeatureFuse）
+query=key=value=自身
+  ↓ 多头注意力 + 残差
+增强特征 [B, 512, 1024]
+```
+作用：捕获特征间全局关系，增强判别性**
+
+NetVLAD聚合
+```
+增强特征 [B, 512, 1024]
+  ↓ 软分配到32个聚类中心
+软分配权重 [B, 1024, 32]
+  ↓ 加权残差聚合
+VLAD表示 [B, 512×32]
+  ↓ L2归一化
+  ↓ 全连接(512×32 → 1024)
+  ↓ 门控机制（可选）
+全局描述符 [B, 1024]
+```
+作用：从局部特征聚合为紧凑全局描述符，用于场景检索**
+
+核心设计思想
+1. 注意力增强：自注意力捕获特征依赖关系
+2. VLAD聚合：可学习聚类中心，残差编码局部-全局差异
+3. 门控机制：自适应调整特征权重
+4. 紧凑表示：1024维向量表达整个场景
+
+三、训练流程
+
+Stage1: 点级监督
+输入: 点云对 + ICP变换
+  ↓
+体素化 [2, 32, 256, 256]
+  ↓
+BEVNet前向
+  ↓
+损失计算:
+├─ pair_loss（点对匹配）
+│  ├─ circle_loss: 描述符度量学习
+│  ├─ det_loss: 关键点检测
+│  └─ z_loss: 高度预测
+├─ overlap_loss: 重叠区域分类
+└─ dist_loss: 特征距离对比
+  ↓
+反向传播更新
+  ↓
+输出:
+- `backbone_final.ckpt`: 编码器权重
+- `overlap_final.ckpt`: 重叠头权重
+- `bevnet_final.ckpt`: 完整模型
+
+Stage2: 场景级监督
+输入: 预提取BEV特征 [512, 32, 32]
+  ↓
+构建triplet: query + 2pos + 10neg
+  ↓
+AttnVLAD前向 → [B, 1024]
+  ↓
+triplet_loss:
+  - 拉近query-positive距离
+  - 推远query-negative距离
+  - hard mining动态调整难例
+  ↓
+反向传播更新
+  ↓
+输出:
+- `attnvlad_final.ckpt`: 全局描述符生成器
+
+四、评估流程
+
+Coarse检索
+```
+数据库: N个场景的全局描述符
+查询: 当前场景描述符
+  ↓
+计算L2距离 [N]
+  ↓
+排序取topK候选（如K=25）
+```
+Fine重排
+```
+topK候选
+  ↓
+加载原始BEV特征
+  ↓
+OverlapHead计算重叠度分数
+  ↓
+按分数重排序
+  ↓
+输出top1作为最终匹配
+```
+评估指标
+```
+- Recall@1: top1正确率
+- Recall@5: top5正确率
+- Recall@1%: top1%正确率
+```
+
+核心思想: 粗检索快速筛选，精重排提升准确率
+
+五、数据流总览
+```
+原始点云 (.bin)
+  ↓ 体素化
+BEV occupancy [32, 256, 256]
+  ↓ Stage1: BEVNet
+├─ 高分辨率: 点级特征 [N, 65]
+└─ 低分辨率: BEV特征 [512, 32, 32]
+  ↓ 保存到硬盘
+BEV_FEA/*.npy
+  ↓ Stage2: AttnVLAD
+全局描述符 [1024]
+  ↓ 评估
+Coarse检索 → topK
+  ↓
+Fine重排 → top1
+```
